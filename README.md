@@ -61,8 +61,13 @@ project (which would leave a stray `uv.lock` and `.venv` behind).
 It reads Xcode's bundle from `/Library/Developer` (falling back to attaching
 `CoreDevice/CandidateDDIs/<platform>_DDI.dmg` when no expanded copy exists), verifies every payload
 against the SHA-384 digests in the build manifest before publishing it, and removes stale files
-left over from a previous build. Remember to bump `LATEST_DDI_BUILD_ID` in pymobiledevice3 to match
-whatever build it reports.
+left over from a previous build.
+
+The `Update Xcode DDI` GitHub Actions workflow runs daily and can also be started manually. It uses
+the newest beta on GitHub's `xcode-27` preview runner, falling back to its release candidate when
+GitHub has advanced past beta. It compares that Xcode's iOS DDI with the published build and opens
+an update pull request when the build changes. The pull request includes the supported product and
+board diff. Repository settings must allow GitHub Actions to create pull requests.
 
 # Python package
 
