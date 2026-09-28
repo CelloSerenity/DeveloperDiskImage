@@ -25,8 +25,10 @@ image inside: `~/Library/Developer/DeveloperDiskImages`.
 | Directory | Consumed by |
 |---|---|
 | `DeveloperDiskImages/<version>/` | iOS < 17.0 |
-| `PersonalizedImages/Xcode_iOS_DDI_Personalized/` | the image mounter (`mounter auto-mount` on iOS 17.0 - 17.3.1 without an RSD tunnel, and released pymobiledevice3 versions) |
-| `PersonalizedImages/Xcode_iOS_DDI_Cryptex/` | `cryptexd` (`mounter auto-mount` from iOS 17.4 or over an RSD tunnel, and `cryptex auto-install`) |
+| `PersonalizedImages/Xcode_iOS_DDI_Personalized/` | the image mounter (`mounter auto-mount` on iOS 17.0 - 26.x) |
+| `PersonalizedImages/Xcode_iOS_DDI_Cryptex/` | `cryptexd` (`mounter auto-mount` on capable iOS 27.0+ devices, or `cryptex auto-install` on iOS 26.4+) |
+| `PersonalizedImages/Xcode_tvOS_DDI_Personalized/` | the tvOS image mounter |
+| `PersonalizedImages/Xcode_tvOS_DDI_Cryptex/` | `cryptexd` on tvOS |
 
 **Newer devices, such as the iPhone 18 series, can only use the Cryptex variant.** Every
 `PersonalizedDMG` build identity is tied to an `ApChipID`/`ApBoardID` pair, so it only covers the
@@ -36,10 +38,11 @@ outside that list has no identity to request a ticket for (pymobiledevice3 repor
 (`Cryptex1,UseProductClass`, no chip or board), so the manifest doesn't limit which devices it can
 be personalized for; Apple's signing server decides, as it does for Xcode.
 
-This is why pymobiledevice3's `mounter auto-mount` installs the Cryptex variant through `cryptexd`
-from iOS 17.4, setting up the RSD tunnel it needs by itself. The Personalized variant is kept for
-backward compatibility: released pymobiledevice3 versions fetch exactly its paths, and iOS 17.0 -
-17.3.1 without a tunnel still mounts it.
+This is why pymobiledevice3's
+[`auto_mount`](https://github.com/doronz88/pymobiledevice3/blob/1281233792b6d0873f85d4bd68a081b63c7c5fdf/pymobiledevice3/services/mobile_image_mounter.py#L559-L635)
+uses the Cryptex variant on iOS 27 and later when connected over RSD and `cryptexd` advertises
+`CryptexInstall`; the CLI retries over a tunnel when RSD is required. The Personalized variant
+remains the automatic path for iOS 17.0 - 26.x.
 
 Every payload is published under a fixed file name, so download URLs stay predictable across
 releases:
