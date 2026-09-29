@@ -1,0 +1,167 @@
+name: Update Xcode DDI
+
+on:
+  schedule:
+    - cron: "37 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-xcode-ddi
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: xcode-27
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Select the latest Xcode prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcode_path=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          applications = Path('/Applications')
+          candidates = list(applications.glob('Xcode_*_beta*.app'))
+          if not candidates:
+              candidates = list(applications.glob('Xcode_*_Release_Candidate.app'))
+          if not candidates:
+              raise SystemExit('The xcode-27 runner has no beta or release-candidate Xcode installed')
+
+          natural = lambda path: [int(part) if part.isdigit() else part.casefold()
+                                  for part in re.split(r'(\d+)', path.name)]
+          print(max(candidates, key=natural))
+          PY
+          )
+          echo "DEVELOPER_DIR=$xcode_path/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Using $xcode_path"
+
+      - name: Prepare Xcode Developer Disk Images
+        run: |
+          xcodebuild -version
+          sudo xcodebuild -runFirstLaunch
+
+      - name: Read the latest DDI manifest
+        id: ddi
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manifest=/Library/Developer/DeveloperDiskImages/iOS_DDI/Restore/BuildManifest.plist
+          candidate=/Library/Developer/CoreDevice/CandidateDDIs/iOS_DDI.dmg
+          copied_manifest="$RUNNER_TEMP/BuildManifest.plist"
+
+          if [[ -f "$manifest" ]]; then
+            cp "$manifest" "$copied_manifest"
+          elif [[ -f "$candidate" ]]; then
+            mount_point="$RUNNER_TEMP/iOS_DDI"
+            mkdir -p "$mount_point"
+            hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$candidate"
+            trap 'hdiutil detach "$mount_point"' EXIT
+            cp "$mount_point/Restore/BuildManifest.plist" "$copied_manifest"
+          else
+            echo "Xcode did not install an expanded or candidate iOS DDI" >&2
+            exit 1
+          fi
+
+          build=$(python3 -c 'import plistlib, sys; print(plistlib.load(open(sys.argv[1], "rb"))["ProductBuildVersion"])' "$copied_manifest")
+          if [[ ! "$build" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "Unexpected ProductBuildVersion: $build" >&2
+            exit 1
+          fi
+
+          published=$(python3 -c 'import plistlib, sys; print(plistlib.load(open(sys.argv[1], "rb"))["ProductBuildVersion"])' PersonalizedImages/Xcode_iOS_DDI_Personalized/BuildManifest.plist)
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "changed=$([[ "$build" != "$published" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Compare supported device models
+        if: steps.ddi.outputs.changed == 'true'
+        run: |
+          python3 .claude/skills/updating-xcode-ddis/ddi_model_diff.py \
+            --ref HEAD \
+            --new "$RUNNER_TEMP/BuildManifest.plist" \
+            | tee "$RUNNER_TEMP/ddi-model-diff.txt"
+
+      - name: Check for an earlier update
+        if: steps.ddi.outputs.changed == 'true'
+        id: prior
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DDI_BUILD: ${{ steps.ddi.outputs.build }}
+        run: |
+          set -euo pipefail
+
+          prior=$(gh pr list --state all --search "$DDI_BUILD in:title" --json number,state,mergedAt,url --limit 1)
+          echo "result=$prior" >> "$GITHUB_OUTPUT"
+
+          if [[ $(python3 -c 'import json, sys; print(len(json.loads(sys.argv[1])))' "$prior") -ne 0 ]]; then
+            python3 -c 'import json, sys; pr=json.loads(sys.argv[1])[0]; print(f"A prior pull request already covers this build: {pr[\"url\"]} ({pr[\"state\"]})")' "$prior"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Refresh DDI payloads
+        if: steps.ddi.outputs.changed == 'true' && steps.prior.outputs.exists == 'false'
+        run: python3 update_ddi.py
+
+      - name: Validate generated changes
+        if: steps.ddi.outputs.changed == 'true' && steps.prior.outputs.exists == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          unexpected=$(git status --porcelain | awk '$2 !~ /^PersonalizedImages\// { print }')
+          if [[ -n "$unexpected" ]]; then
+            echo "The updater changed files outside PersonalizedImages:" >&2
+            echo "$unexpected" >&2
+            exit 1
+          fi
+
+          if git diff --exit-code --quiet -- PersonalizedImages; then
+            echo "The build changed, but the updater produced no payload changes" >&2
+            exit 1
+          fi
+
+      - name: Create update pull request
+        if: steps.ddi.outputs.changed == 'true' && steps.prior.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DDI_BUILD: ${{ steps.ddi.outputs.build }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          branch="bugfix/image-$DDI_BUILD"
+          title="maintenance: Update DDIs to \`$DDI_BUILD\`"
+          body="$RUNNER_TEMP/pull-request-body.md"
+
+          {
+            echo 'Automated from the default Xcode installation on GitHub’s `xcode-27` runner.'
+            echo
+            echo 'The updater verified every payload against the SHA-384 digests in Xcode’s build manifest.'
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/ddi-model-diff.txt"
+            echo '```'
+          } > "$body"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add PersonalizedImages
+          git commit -m "$title"
+          git push --set-upstream origin "$branch"
+          gh pr create --base "${{ github.event.repository.default_branch }}" --head "$branch" --title "$title" --body-file "$body"
